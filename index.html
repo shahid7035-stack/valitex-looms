@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Valitex Live Looms</title>
+<style>
+:root{--navy:#0B2545;--charcoal:#1F2937;--run:#15803D;--stop:#B91C1C;--low:#B45309;--tab:#0C4A6E;--bg:#F3F4F6;--line:#E5E7EB}
+*{box-sizing:border-box}
+body{margin:0;font-family:Arial,Helvetica,sans-serif;background:var(--bg);color:#111}
+header{background:var(--navy);color:#fff;padding:12px 14px}
+header h1{margin:0;font-size:20px}
+header .dev{font-size:12px;opacity:.85;margin-top:2px}
+header .upd{font-size:12px;margin-top:6px}
+#warn{display:none;background:#FEF3C7;color:#78350F;padding:8px 14px;font-size:13px}
+#err{display:none;background:#FEE2E2;color:#7F1D1D;padding:8px 14px;font-size:13px;white-space:pre-wrap}
+nav{display:flex;gap:6px;overflow-x:auto;padding:10px;background:#fff;border-bottom:1px solid var(--line)}
+nav button{flex:0 0 auto;border:1px solid var(--tab);background:#fff;color:var(--tab);padding:8px 12px;border-radius:6px;font-weight:bold;cursor:pointer}
+nav button.on{background:var(--tab);color:#fff}
+main{padding:10px}
+.stats{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-bottom:12px}
+.stat{background:#fff;border:1px solid var(--line);border-radius:8px;padding:10px}
+.stat .l{font-size:12px;color:#4B5563}
+.stat .v{font-size:22px;font-weight:bold;color:var(--charcoal)}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px}
+.card{background:#fff;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.card.run-c{border-left:6px solid var(--run)}
+.card.stop-c{border-left:6px solid var(--stop)}
+.card.low-c{border-left:6px solid var(--low)}
+.card .head{background:#000;color:#fff;padding:6px 8px;display:flex;justify-content:space-between;align-items:center}
+.card .head .lbl{font-size:12px;color:#fff}
+.card .num{font-size:18px;font-weight:900;color:#fff}
+.card .body{padding:8px;font-size:13px;line-height:1.6;color:#111}
+.badge{font-size:11px;font-weight:bold;color:#fff;padding:2px 6px;border-radius:4px}
+.b-run{background:var(--run)} .b-stop{background:var(--stop)} .b-low{background:var(--low)}
+.empty{padding:20px;color:#4B5563}
+</style>
+</head>
+<body>
+<header>
+  <h1>Valitex (Pvt) Ltd</h1>
+  <div class="dev">Developed by Shahid Khan</div>
+  <div class="upd" id="upd">Loading...</div>
+</header>
+<div id="warn"></div>
+<div id="err"></div>
+<nav id="tabs"></nav>
+<main>
+  <div class="stats" id="stats"></div>
+  <div class="grid" id="looms"></div>
+  <div class="empty" id="empty" style="display:none">No data yet.</div>
+</main>
+
+<script>
+// ===== SETTINGS =====
+// Replace PASTE_PUBLISHABLE_KEY_HERE with the publishable key (sb_publishable_...) from Supabase.
+// Do NOT put the service_role key or the sb_secret_ key here.
+const SUPABASE_URL = "https://isvtpncfxzopfvmosnzd.supabase.co";
+const SUPABASE_KEY = "PASTE_PUBLISHABLE_KEY_HERE";
+const REFRESH_MS = 40000;   // refresh every 40 seconds
+const STALE_MIN = 3;        // warn if data is older than 3 minutes
+const LOW_FACTOR = 0.8;     // running loom below 80% of shed average RPM = low speed
+
+let selected = null;
+let lastLooms = [];
+let lastSheds = [];
+
+async function getTable(table) {
+  const r = await fetch(SUPABASE_URL + "/rest/v1/" + table + "?select=*", {
+    headers: { apikey: SUPABASE_KEY, Authorization: "Bearer " + SUPABASE_KEY }
+  });
+  if (!r.ok) {
+    throw new Error(table + " error " + r.status + ": " + (await r.text()));
+  }
+  return r.json();
+}
+
+function isRunning(l) { return Number(l.rpm) > 0; }
+
+function avgRpmOfRunning(looms) {
+  const r = looms.filter(isRunning);
+  if (!r.length) return 0;
+  return r.reduce((a, l) => a + Number(l.rpm), 0) / r.length;
+}
+
+function fmt(v, d) {
+  if (v === null || v === undefined || v === "") return "-";
+  const n = Number(v);
+  return isNaN(n) ? String(v) : n.toFixed(d === undefined ? 1 : d);
+}
+
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined) e.textContent = text;
+  return e;
+}
+
+function render() {
+  const names = new Set();
+  lastSheds.forEach(s => names.add(s.shed_name));
+  lastLooms.forEach(l => names.add(l.shed_name));
+  const shedList = [...names].filter(Boolean).sort();
+  if (!selected || !shedList.includes(selected)) selected = shedList[0] || null;
+
+  // Tabs (built from data, so new sheds appear automatically)
+  const tabs = document.getElementById("tabs");
+  tabs.innerHTML = "";
+  shedList.forEach(n => {
+    const b = el("button", n === selected ? "on" : "", n);
+    b.onclick = () => { selected = n; render(); };
+    tabs.appendChild(b);
+  });
+
+  const looms = lastLooms
+    .filter(l => l.shed_name === selected)
+    .sort((a, b) => (parseInt(a.loom_name) || 0) - (parseInt(b.loom_name) || 0));
+  const shed = lastSheds.find(s => s.shed_name === selected) || {};
+  const avg = avgRpmOfRunning(looms);
+  const running = looms.filter(isRunning).length;
+  const stopped = looms.length - running;
+
+  // Summary stats
+  const stats = document.getElementById("stats");
+  stats.innerHTML = "";
+  [
+    ["Shed Efficiency (%)", fmt(shed.shed_efficiency)],
+    ["Running Efficiency (%)", fmt(shed.running_efficiency)],
+    ["Running Looms", running + " / " + looms.length],
+    ["Average RPM", fmt(shed.average_rpm !== undefined && shed.average_rpm !== null ? shed.average_rpm : avg)],
+    ["Stopped Looms", String(stopped)]
+  ].forEach(([label, value]) => {
+    const box = el("div", "stat");
+    box.appendChild(el("div", "l", label));
+    box.appendChild(el("div", "v", value));
+    stats.appendChild(box);
+  });
+
+  // Loom cards
+  const grid = document.getElementById("looms");
+  grid.innerHTML = "";
+  looms.forEach(l => {
+    let kind = "stop";
+    if (isRunning(l)) kind = (avg && Number(l.rpm) < LOW_FACTOR * avg) ? "low" : "run";
+    const card = el("div", "card " + kind + "-c");
+    const head = el("div", "head");
+    const lbl = el("span", "lbl", "Loom");
+    const num = el("span", "num", String(l.loom_name));
+    head.appendChild(lbl);
+    head.appendChild(num);
+    card.appendChild(head);
+    const body = el("div", "body");
+    const badgeText = kind === "run" ? "Running" : kind === "low" ? "Low speed" : "Stopped";
+    body.appendChild(el("span", "badge b-" + kind, badgeText));
+    body.appendChild(document.createElement("br"));
+    body.appendChild(document.createTextNode("RPM: " + fmt(l.rpm, 0)));
+    body.appendChild(document.createElement("br"));
+    body.appendChild(document.createTextNode("Efficiency: " + fmt(l.current_eff, 1) + " %"));
+    body.appendChild(document.createElement("br"));
+    body.appendChild(document.createTextNode("Picks: " + fmt(l.picks, 0)));
+    body.appendChild(document.createElement("br"));
+    body.appendChild(document.createTextNode("Article: " + (l.article_number || "-")));
+    card.appendChild(body);
+    grid.appendChild(card);
+  });
+  document.getElementById("empty").style.display = looms.length ? "none" : "block";
+}
+
+function checkStale() {
+  const warn = document.getElementById("warn");
+  let newest = 0;
+  lastLooms.forEach(l => { const t = Date.parse(l.updated_at); if (t > newest) newest = t; });
+  if (!newest) { warn.style.display = "none"; return; }
+  const ageMin = (Date.now() - newest) / 60000;
+  if (ageMin > STALE_MIN) {
+    warn.textContent = "Warning: data is " + Math.round(ageMin) + " minutes old. Check that the uploader window is running.";
+    warn.style.display = "block";
+  } else {
+    warn.style.display = "none";
+  }
+}
+
+async function load() {
+  const err = document.getElementById("err");
+  if (SUPABASE_KEY.indexOf("PASTE_") === 0) {
+    err.textContent = "Setup needed: publishable key is not set in the app.";
+    err.style.display = "block";
+    return;
+  }
+  try {
+    const [looms, sheds] = await Promise.all([getTable("looms"), getTable("sheds")]);
+    lastLooms = looms;
+    lastSheds = sheds;
+    err.style.display = "none";
+    render();
+    checkStale();
+    document.getElementById("upd").textContent = "Last refresh: " + new Date().toLocaleTimeString();
+  } catch (e) {
+    err.textContent = "Data load failed. " + e.message;
+    err.style.display = "block";
+  }
+}
+
+load();
+setInterval(load, REFRESH_MS);
+</script>
+</body>
+</html>
